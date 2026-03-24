@@ -1,0 +1,26 @@
+[package]
+name = "eve"
+version = "0.1.0"
+edition = "2021"
+description = "Encoded VoIP Exfil — transfers files as mFSK audio over SIP/RTP"
+
+[lib]
+name = "eve"
+path = "src/lib.rs"
+
+[[bin]]
+name = "eve"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+crc32fast = "1"
+sha2 = "0.10"
+bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"
+
+[dev-dependencies]
+sha2 = "0.10"
