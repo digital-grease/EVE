@@ -61,6 +61,18 @@ impl Depacketizer {
         self.try_assemble()
     }
 
+    /// Return the sequence numbers of data frames that have not yet been received.
+    ///
+    /// Returns an empty vec if the total frame count is not yet known (FIN not seen).
+    pub fn missing_seqs(&self) -> Vec<u32> {
+        match self.total_data_frames {
+            None => vec![],
+            Some(total) => (1..=total)
+                .filter(|seq| !self.frames.contains_key(seq))
+                .collect(),
+        }
+    }
+
     /// Current progress as (received_data_frames, total_data_frames).
     pub fn progress(&self) -> (usize, Option<usize>) {
         (

@@ -1,7 +1,20 @@
 /// UDP socket wrapper for SIP and RTP.
 /// Wraps a `tokio::net::UdpSocket` with send/recv helpers.
+///
+/// Uses `Arc` internally so the transport can be cheaply cloned — both
+/// the original and the clone refer to the same bound socket.  This allows
+/// the ARQ coordinator to keep a reference to the receiver socket after the
+/// RTP-receive task has finished with it.
 pub struct UdpTransport {
-    socket: tokio::net::UdpSocket,
+    socket: std::sync::Arc<tokio::net::UdpSocket>,
+}
+
+impl Clone for UdpTransport {
+    fn clone(&self) -> Self {
+        Self {
+            socket: self.socket.clone(),
+        }
+    }
 }
 
 impl UdpTransport {
@@ -13,7 +26,9 @@ impl UdpTransport {
                 source: e,
             }
         })?;
-        Ok(Self { socket })
+        Ok(Self {
+            socket: std::sync::Arc::new(socket),
+        })
     }
 
     /// Send `data` to `dest`.

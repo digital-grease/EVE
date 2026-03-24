@@ -93,12 +93,31 @@ impl Default for VoipConfig {
     }
 }
 
+/// ARQ (Automatic Repeat reQuest) configuration.
+#[derive(Debug, Clone)]
+pub struct ArqConfig {
+    /// Maximum number of retransmission rounds (0 = ARQ disabled).
+    pub retries: u32,
+    /// How long the sender waits for a NAK from the receiver, in milliseconds.
+    pub timeout_ms: u64,
+}
+
+impl Default for ArqConfig {
+    fn default() -> Self {
+        Self {
+            retries: 3,
+            timeout_ms: 2000,
+        }
+    }
+}
+
 /// Combined runtime configuration passed through the pipeline.
 #[derive(Debug, Clone, Default)]
 pub struct Config {
     pub codec: CodecConfig,
     pub framing: FramingConfig,
     pub voip: VoipConfig,
+    pub arq: ArqConfig,
     /// Print per-symbol diagnostics.
     pub verbose: bool,
     /// Optionally dump raw PCM to a WAV file.
