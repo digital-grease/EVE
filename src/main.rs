@@ -73,6 +73,14 @@ struct Cli {
     /// Duration of each signal tone in milliseconds
     #[arg(long, global = true, default_value_t = 200)]
     signal_tone_ms: u32,
+
+    /// ARQ retransmission rounds (0 = disabled)
+    #[arg(long, global = true, default_value_t = 3)]
+    arq_retries: u32,
+
+    /// Milliseconds sender waits for a NAK before giving up
+    #[arg(long, global = true, default_value_t = 2000)]
+    arq_timeout: u64,
 }
 
 #[derive(Subcommand)]
@@ -102,6 +110,10 @@ enum Command {
         /// File to round-trip through the codec
         #[arg(long, short)]
         file: PathBuf,
+
+        /// Fraction of frame bytes to randomly drop before decoding (0.0–1.0)
+        #[arg(long, default_value_t = 0.0)]
+        loss_rate: f64,
     },
 }
 
@@ -138,12 +150,17 @@ async fn main() {
         rtp_port: cli.rtp_port,
         jitter_ms: cli.jitter_ms,
     };
+    let arq_cfg = config::ArqConfig {
+        retries: cli.arq_retries,
+        timeout_ms: cli.arq_timeout,
+    };
     match cli.command {
         Command::Send { file, dest } => {
             let cfg = config::Config {
                 codec: codec_cfg,
                 framing: framing_cfg,
                 voip: voip_cfg,
+                arq: arq_cfg,
                 verbose: cli.verbose,
                 save_audio: cli.save_audio,
                 persist: false,
@@ -155,22 +172,24 @@ async fn main() {
                 codec: codec_cfg,
                 framing: framing_cfg,
                 voip: voip_cfg,
+                arq: arq_cfg,
                 verbose: cli.verbose,
                 save_audio: cli.save_audio,
                 persist,
             };
             pipeline::run_receiver(output_dir, cfg).await;
         }
-        Command::Loopback { file } => {
+        Command::Loopback { file, loss_rate } => {
             let cfg = config::Config {
                 codec: codec_cfg,
                 framing: framing_cfg,
                 voip: voip_cfg,
+                arq: arq_cfg,
                 verbose: cli.verbose,
                 save_audio: cli.save_audio,
                 persist: false,
             };
-            let ok = pipeline::run_loopback(file, cfg);
+            let ok = pipeline::run_loopback(file, cfg, loss_rate);
             std::process::exit(if ok { 0 } else { 1 });
         }
     }

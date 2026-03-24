@@ -142,6 +142,44 @@ pub fn deserialize_frame(data: &[u8]) -> Result<Frame, FramingError> {
     })
 }
 
+/// Serialize a NAK frame containing a list of missing sequence numbers.
+///
+/// The NAK frame uses the standard frame wire format with `flags::NAK` set.
+/// Payload is a packed array of big-endian u32 sequence numbers.
+pub fn serialize_nak_frame(missing: &[u32]) -> Vec<u8> {
+    use super::flags;
+    let mut payload = Vec::with_capacity(missing.len() * 4);
+    for &seq in missing {
+        payload.extend_from_slice(&seq.to_be_bytes());
+    }
+    let nak_frame = super::Frame {
+        seq: 0,
+        flags: flags::NAK,
+        payload,
+    };
+    serialize_frame(&nak_frame)
+}
+
+/// Deserialize a NAK frame and return the list of missing sequence numbers.
+///
+/// Returns `FramingError` if the frame is malformed or is not a NAK frame.
+pub fn deserialize_nak_frame(data: &[u8]) -> Result<Vec<u32>, super::FramingError> {
+    use super::flags;
+    let frame = deserialize_frame(data)?;
+    if frame.flags & flags::NAK == 0 {
+        return Err(super::FramingError::BadMagic(0));
+    }
+    if frame.payload.len() % 4 != 0 {
+        return Err(super::FramingError::PayloadTooLarge(frame.payload.len()));
+    }
+    let seqs = frame
+        .payload
+        .chunks_exact(4)
+        .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+        .collect();
+    Ok(seqs)
+}
+
 /// Split a contiguous byte buffer (output of the mFSK decoder) into individual
 /// [`Frame`]s by reading successive frame headers.
 ///

@@ -12,8 +12,8 @@ pub mod flags {
     pub const SYN: u8 = 0b0000_0001;
     /// Last frame.
     pub const FIN: u8 = 0b0000_0010;
-    /// ACK-request (reserved for future ARQ).
-    pub const ACK_REQ: u8 = 0b0000_0100;
+    /// NAK: payload is a list of big-endian u32 sequence numbers the receiver is missing.
+    pub const NAK: u8 = 0b0000_0100;
 }
 
 /// A single framing unit transmitted over the audio channel.
