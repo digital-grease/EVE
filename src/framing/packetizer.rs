@@ -163,6 +163,7 @@ pub fn serialize_nak_frame(missing: &[u32]) -> Vec<u8> {
 /// Deserialize a NAK frame and return the list of missing sequence numbers.
 ///
 /// Returns `FramingError` if the frame is malformed or is not a NAK frame.
+#[allow(dead_code)] // Public API used by integration tests and external consumers
 pub fn deserialize_nak_frame(data: &[u8]) -> Result<Vec<u32>, super::FramingError> {
     use super::flags;
     let frame = deserialize_frame(data)?;

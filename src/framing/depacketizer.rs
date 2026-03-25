@@ -249,6 +249,37 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn test_sanitise_path_traversal() {
+        assert_eq!(
+            sanitise_filename("../../../etc/passwd"),
+            ".._.._.._etc_passwd"
+        );
+    }
+
+    #[test]
+    fn test_sanitise_absolute_path() {
+        assert_eq!(sanitise_filename("/etc/shadow"), "_etc_shadow");
+    }
+
+    #[test]
+    fn test_sanitise_backslashes() {
+        assert_eq!(
+            sanitise_filename("C:\\Windows\\System32\\cmd.exe"),
+            "C:_Windows_System32_cmd.exe"
+        );
+    }
+
+    #[test]
+    fn test_sanitise_null_bytes() {
+        assert_eq!(sanitise_filename("evil\0name.txt"), "evil_name.txt");
+    }
+
+    #[test]
+    fn test_sanitise_normal_filename_unchanged() {
+        assert_eq!(sanitise_filename("report.pdf"), "report.pdf");
+    }
+
     /// Create a unique temporary directory for test output.
     fn tempdir() -> std::path::PathBuf {
         // Use both process ID and thread ID to avoid collisions across parallel tests.

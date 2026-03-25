@@ -44,6 +44,7 @@ impl CodecConfig {
 
 impl CodecConfig {
     /// Number of bits encoded per symbol: log2(M).
+    #[allow(dead_code)] // Public utility used by external consumers and diagnostics
     pub fn bits_per_symbol(&self) -> u32 {
         (self.tones as f64).log2() as u32
     }
