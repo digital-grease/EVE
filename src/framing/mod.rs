@@ -38,8 +38,10 @@ pub enum FramingError {
     },
     #[error("bad magic {0:#06x}")]
     BadMagic(u16),
+    #[allow(dead_code)] // Reserved for future payload validation
     #[error("payload length {0} exceeds max frame size")]
     PayloadTooLarge(usize),
+    #[allow(dead_code)] // Reserved for strict reassembly mode
     #[error("missing frames: {0:?}")]
     MissingFrames(Vec<u32>),
     #[error("I/O error: {0}")]

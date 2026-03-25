@@ -157,8 +157,8 @@ impl RtpSession {
 
 /// Packet stored in the dejitter buffer.
 struct Buffered {
-    seq: u16,
-    timestamp: u32,
+    _seq: u16,
+    _timestamp: u32,
     payload: Vec<u8>,
 }
 
@@ -191,8 +191,8 @@ impl DejitterBuffer {
         self.buffer.insert(
             seq,
             Buffered {
-                seq,
-                timestamp: ts,
+                _seq: seq,
+                _timestamp: ts,
                 payload: payload.to_vec(),
             },
         );

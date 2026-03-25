@@ -44,6 +44,27 @@ impl MfskDecoder {
     /// the start signal tone — this lets a persist-mode receiver skip non-eve
     /// audio without attempting preamble correlation.
     pub fn decode(&self, samples: &[i16]) -> Result<Vec<u8>, super::CodecError> {
+        let (bytes, _) = self.decode_inner(samples, false)?;
+        Ok(bytes)
+    }
+
+    /// Decode PCM samples to bytes with per-symbol SNR diagnostics.
+    ///
+    /// Returns `(decoded_bytes, snr_ratios)` where each SNR ratio is
+    /// `best_energy / second_best_energy` for the corresponding symbol.
+    /// Higher values indicate more confident tone detection.
+    pub fn decode_verbose(
+        &self,
+        samples: &[i16],
+    ) -> Result<(Vec<u8>, Vec<f64>), super::CodecError> {
+        self.decode_inner(samples, true)
+    }
+
+    fn decode_inner(
+        &self,
+        samples: &[i16],
+        collect_snr: bool,
+    ) -> Result<(Vec<u8>, Vec<f64>), super::CodecError> {
         let m = self.config.tones as usize;
         let bits_per_symbol = (m as f64).log2() as usize;
         let sps = self.config.samples_per_symbol();
@@ -72,24 +93,33 @@ impl MfskDecoder {
         // 3. Demodulate symbol by symbol, stopping at the stop signal tone.
         let data_samples = &samples[data_start..];
         if data_samples.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), Vec::new()));
         }
 
         let n_symbols = data_samples.len() / sps;
         let mut symbol_bits: Vec<u8> = Vec::with_capacity(n_symbols * bits_per_symbol);
+        let mut snr_ratios: Vec<f64> = if collect_snr {
+            Vec::with_capacity(n_symbols)
+        } else {
+            Vec::new()
+        };
 
         for i in 0..n_symbols {
             let window = &data_samples[i * sps..(i + 1) * sps];
 
             // Stop demodulating if this window carries the stop signal tone.
-            // We compare the stop-tone Goertzel energy against the strongest
-            // data-tone Goertzel energy.  A genuine stop tone dominates over
-            // all data bins; a data symbol has one data-bin far above the rest.
             if self.is_stop_tone_window(window) {
                 break;
             }
 
             let tone_idx = self.detect_tone(window);
+
+            if collect_snr {
+                let (best, second) = self.snr_estimate(window);
+                let ratio = if second > 0.0 { best / second } else { f64::INFINITY };
+                snr_ratios.push(ratio);
+            }
+
             // Convert tone index to bits (MSB first).
             for shift in (0..bits_per_symbol).rev() {
                 symbol_bits.push(((tone_idx >> shift) & 1) as u8);
@@ -99,7 +129,7 @@ impl MfskDecoder {
         // Pack bits into bytes (ignore trailing padding bits).
         let n_bytes = symbol_bits.len() / 8;
         let bytes = bits_to_bytes(&symbol_bits[..n_bytes * 8]);
-        Ok(bytes)
+        Ok((bytes, snr_ratios))
     }
 
     /// Detect which of the M tones is most energetic in `window` using a

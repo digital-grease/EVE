@@ -11,7 +11,7 @@ use crate::wav;
 use std::collections::HashMap;
 use std::io::BufWriter;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, timeout, Duration, MissedTickBehavior};
 use tracing::{info, warn};
@@ -42,7 +42,7 @@ async fn send_rtp_burst(
             warn!("RTP send error: {e}");
         }
         sent += 1;
-        if verbose && sent % 50 == 0 {
+        if verbose && sent.is_multiple_of(50) {
             info!("sent {sent} RTP packets");
         }
     }
@@ -292,7 +292,7 @@ pub async fn run_receiver(output_dir: PathBuf, config: Config) {
 /// the receiver enters an ARQ loop: it encodes the missing sequence list as a
 /// NAK mFSK burst and sends it back to the caller, then waits for retransmitted
 /// frames.  The loop repeats until the file is complete or retries are exhausted.
-async fn receive_one(output_dir: &PathBuf, config: &Config) {
+async fn receive_one(output_dir: &Path, config: &Config) {
     let voip = config.voip.clone();
     let codec = config.codec.clone();
 
@@ -385,14 +385,33 @@ async fn receive_one(output_dir: &PathBuf, config: &Config) {
     // ---- Decode (blocking) ----
     // Returns (output_path, depacketizer) so the ARQ loop can feed more frames
     // to the same depacketizer instance if some were missing on the first pass.
-    let output_dir_clone = output_dir.clone();
+    let output_dir_clone = output_dir.to_path_buf();
+    let verbose = config.verbose;
     let decode_result = tokio::task::spawn_blocking(move || {
         let pcm = ulaw_to_pcm(&all_ulaw);
         let dec = MfskDecoder::new(codec)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
-        let all_bytes = dec
-            .decode(&pcm)
-            .map_err(std::io::Error::other)?;
+        let all_bytes = if verbose {
+            let (bytes, snr_ratios) = dec
+                .decode_verbose(&pcm)
+                .map_err(std::io::Error::other)?;
+            if !snr_ratios.is_empty() {
+                let min_snr = snr_ratios.iter().cloned().fold(f64::INFINITY, f64::min);
+                let avg_snr = snr_ratios.iter().sum::<f64>() / snr_ratios.len() as f64;
+                let low_confidence = snr_ratios.iter().filter(|&&r| r < 3.0).count();
+                eprintln!(
+                    "mFSK decode: {} symbols, SNR min={:.1} avg={:.1}, low-confidence={}/{}",
+                    snr_ratios.len(),
+                    min_snr,
+                    avg_snr,
+                    low_confidence,
+                    snr_ratios.len(),
+                );
+            }
+            bytes
+        } else {
+            dec.decode(&pcm).map_err(std::io::Error::other)?
+        };
         let frames = split_frames(&all_bytes)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
 
