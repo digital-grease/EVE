@@ -39,9 +39,18 @@ Establishes a SIP call to the receiver, encodes the file as mFSK audio, and stre
 
 ```bash
 eve loopback --file myfile.bin --tones 16
+eve loopback --file myfile.bin --tones 8 --loss-rate 0.01   # simulate 1% sample loss
 ```
 
 Encodes then decodes locally and prints the bit-error-rate (BER). Use `--save-audio output.wav` to export the PCM stream for inspection in Audacity.
+
+### Persistent receiver
+
+```bash
+eve recv --output-dir /tmp/received/ --persist
+```
+
+Keeps listening for additional SIP calls after each file is received. Press Ctrl-C to stop.
 
 ---
 
@@ -57,8 +66,20 @@ Encodes then decodes locally and prints the bit-error-rate (BER). Use `--save-au
 | `--sip-port` | 5060 | Local SIP UDP port |
 | `--rtp-port` | 10000 | Local RTP UDP port |
 | `--jitter-ms` | 60 | Dejitter buffer depth (ms) |
-| `--verbose` | off | Print per-symbol diagnostics |
+| `--arq-retries` | 3 | ARQ retransmission rounds (0 = disabled) |
+| `--arq-timeout` | 2000 | Milliseconds sender waits for a NAK before giving up |
+| `--start-tone-freq` | 300 | Start signal tone frequency (Hz) |
+| `--stop-tone-freq` | 3600 | Stop signal tone frequency (Hz) |
+| `--signal-tone-ms` | 200 | Duration of each signal tone (ms) |
+| `--verbose` | off | Print per-symbol SNR diagnostics |
 | `--save-audio <PATH>` | — | Dump generated PCM to a WAV file |
+
+**Subcommand-specific flags:**
+
+| Flag | Subcommand | Description |
+|------|------------|-------------|
+| `--persist` | `recv` | Keep listening for additional transfers after each file completes |
+| `--loss-rate` | `loopback` | Fraction of samples to randomly drop before decoding (0.0–1.0) |
 
 ---
 
@@ -87,6 +108,12 @@ Encodes then decodes locally and prints the bit-error-rate (BER). Use `--save-au
 **Higher `--symbol-rate`** → higher throughput but smaller symbol windows → less accurate Goertzel filter detection.
 
 **Recommended starting point for live VoIP calls:** `--tones 8 --symbol-rate 25` for robustness.
+
+### ARQ (Automatic Repeat reQuest)
+
+When `--arq-retries` > 0 (default: 3), the receiver detects missing frames after the initial transfer and sends a NAK (negative acknowledgement) back to the sender as an mFSK burst over the reverse RTP channel. The sender decodes the NAK, re-encodes only the missing frames, and retransmits them. This loop repeats up to `--arq-retries` times.
+
+Disable ARQ with `--arq-retries 0` for a fire-and-forget transfer.
 
 ### Bandwidth check
 
@@ -124,6 +151,19 @@ src/
 ## Running Tests
 
 ```bash
-cargo test           # 44 tests: 42 unit + 2 integration
-cargo clippy         # No errors
+cargo test                                    # all 68 tests
+cargo test --lib                              # 55 unit tests only
+cargo test --test integration_test            # 5 codec+framing integration tests
+cargo test --test e2e_network_test            # 8 real network E2E tests
+cargo clippy --tests                          # lint check
 ```
+
+### Test layers
+
+| Layer | Count | What it covers |
+|-------|-------|----------------|
+| Unit tests | 55 | mFSK encode/decode, Goertzel, framing serialize/CRC, SIP message build/parse, RTP headers, G.711 μ-law, dejitter buffer, WAV writer |
+| Integration tests | 5 | Full codec+framing round-trip (all M values), multi-frame, empty file, NAK round-trip, ARQ recovery with simulated frame loss |
+| E2E network tests | 8 | Real SIP handshake over UDP, real RTP pacing with dejitter, full sender→receiver file transfer (M=4, M=16, multi-frame) over localhost, CLI binary smoke tests with WAV output |
+
+The E2E network tests exercise the complete stack: SIP signaling, RTP packetization at real 20ms pacing intervals, G.711 μ-law codec, mFSK modulation/demodulation, frame reassembly, and SHA-256 file integrity verification — all over real UDP sockets on localhost.
