@@ -65,8 +65,7 @@ impl MfskDecoder {
         samples: &[i16],
         collect_snr: bool,
     ) -> Result<(Vec<u8>, Vec<f64>), super::CodecError> {
-        let m = self.config.tones as usize;
-        let bits_per_symbol = (m as f64).log2() as usize;
+        let bits_per_symbol = self.config.bits_per_symbol() as usize;
         let sps = self.config.samples_per_symbol();
         let tone_window = self.config.signal_tone_samples();
 
@@ -170,7 +169,7 @@ impl MfskDecoder {
                 )
             })
             .collect();
-        energies.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        energies.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
         (
             energies[0],
             if energies.len() > 1 { energies[1] } else { 0.0 },
@@ -227,6 +226,15 @@ impl MfskDecoder {
             return Err(super::CodecError::PreambleNotFound);
         }
 
+        // Start searching after the start tone to avoid false correlation peaks.
+        let tone_window = self.config.signal_tone_samples();
+        let search_start = tone_window.min(search_len.saturating_sub(1));
+
+        // Cap the search window to prevent O(N²) stall on large inputs.
+        // The preamble should be within 2x the expected position.
+        let expected_preamble_len = 2 * self.config.tones as usize * self.config.samples_per_symbol();
+        let search_end = search_len.min(search_start + 3 * expected_preamble_len);
+
         // Precompute reference energy for normalisation.
         let ref_energy: f64 = reference.iter().map(|&s| (s as f64).powi(2)).sum();
         if ref_energy == 0.0 {
@@ -236,7 +244,7 @@ impl MfskDecoder {
         let mut best_score = f64::NEG_INFINITY;
         let mut best_offset = 0usize;
 
-        for offset in 0..search_len {
+        for offset in search_start..search_end {
             let window = &samples[offset..offset + ref_len];
             let cross: f64 = window
                 .iter()
@@ -287,7 +295,13 @@ pub(super) fn detect_signal_tone(
         return false;
     }
     let tone_energy = goertzel(window, freq, sample_rate as f64);
-    tone_energy / window_energy > fraction
+    // Normalize Goertzel output to the same scale as window energy.
+    // Goertzel returns |X[k]|^2 which scales as (N/2)^2 * A^2 for a pure
+    // sine of amplitude A.  Window energy scales as N/2 * A^2.  Dividing
+    // by N/2 makes both comparable.
+    let n = window.len() as f64;
+    let normalised = tone_energy / (n / 2.0).max(1.0);
+    normalised / window_energy > fraction
 }
 
 /// Goertzel filter: efficient single-bin DFT energy estimate.

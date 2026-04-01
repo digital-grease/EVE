@@ -88,7 +88,7 @@ async fn collect_rtp_burst(
 /// On receipt it decodes the missing sequence list and retransmits those frames.
 pub async fn run_sender(file: PathBuf, dest: SocketAddr, config: Config) {
     // ---- SIP signalling ----
-    let sip = SipAgent::new(config.voip.clone());
+    let mut sip = SipAgent::new(config.voip.clone());
     let call_id = format!("eve-{}", std::process::id());
     info!("sending INVITE to {dest}");
     let receiver_rtp_port = match sip.invite(dest, &call_id).await {
@@ -176,94 +176,92 @@ pub async fn run_sender(file: PathBuf, dest: SocketAddr, config: Config) {
     send_rtp_burst(&samples, &transport, rtp_dest, &mut rtp_sess, config.verbose).await;
     info!("initial transfer complete");
 
-    // ---- BYE ----
-    if let Err(e) = sip.bye(dest, &call_id).await {
-        warn!("BYE error: {e}");
-    }
+    // ---- ARQ retransmission loop (before BYE so the channel stays open) ----
+    if config.arq.retries > 0 && !frame_bytes.is_empty() {
+        let idle = Duration::from_millis(500);
+        let max_wait = Duration::from_millis(config.arq.timeout_ms);
 
-    // ---- ARQ retransmission loop ----
-    if config.arq.retries == 0 || frame_bytes.is_empty() {
-        return;
-    }
+        for retry in 1..=config.arq.retries {
+            // Wait for NAK mFSK burst from receiver.
+            let nak_ulaw = collect_rtp_burst(&transport, idle, max_wait).await;
+            if nak_ulaw.is_empty() {
+                info!("ARQ: no NAK received, transfer complete");
+                break;
+            }
 
-    let idle = Duration::from_millis(500);
-    let max_wait = Duration::from_millis(config.arq.timeout_ms);
+            // Decode NAK → missing seq list.
+            let cfg_c = config.codec.clone();
+            let missing_result =
+                tokio::task::spawn_blocking(move || -> Result<Vec<u32>, std::io::Error> {
+                    let pcm = ulaw_to_pcm(&nak_ulaw);
+                    let dec = MfskDecoder::new(cfg_c).map_err(|e| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
+                    })?;
+                    let bytes = dec.decode(&pcm).map_err(std::io::Error::other)?;
+                    let frames = split_frames(&bytes).map_err(std::io::Error::other)?;
+                    for f in &frames {
+                        if f.flags & framing::flags::NAK != 0 {
+                            let seqs = f
+                                .payload
+                                .chunks_exact(4)
+                                .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+                                .collect();
+                            return Ok(seqs);
+                        }
+                    }
+                    Ok(vec![])
+                })
+                .await
+                .expect("blocking task panicked");
 
-    for retry in 1..=config.arq.retries {
-        // Wait for NAK mFSK burst from receiver.
-        let nak_ulaw = collect_rtp_burst(&transport, idle, max_wait).await;
-        if nak_ulaw.is_empty() {
-            info!("ARQ: no NAK received, transfer complete");
-            break;
-        }
+            let missing = match missing_result {
+                Ok(m) => m,
+                Err(e) => {
+                    warn!("ARQ: failed to decode NAK on retry {retry}: {e}");
+                    continue;
+                }
+            };
 
-        // Decode NAK → missing seq list.
-        let cfg_c = config.codec.clone();
-        let missing_result =
-            tokio::task::spawn_blocking(move || -> Result<Vec<u32>, std::io::Error> {
-                let pcm = ulaw_to_pcm(&nak_ulaw);
-                let dec = MfskDecoder::new(cfg_c).map_err(|e| {
+            if missing.is_empty() {
+                info!("ARQ: empty NAK on retry {retry}, transfer complete");
+                break;
+            }
+
+            info!(
+                "ARQ retry {retry}/{}: retransmitting {} frames",
+                config.arq.retries,
+                missing.len()
+            );
+
+            // Encode only the missing frames.
+            let retry_bytes: Vec<u8> = missing
+                .iter()
+                .filter_map(|&seq| frame_bytes.get(&seq))
+                .flat_map(|b| b.iter().copied())
+                .collect();
+
+            let cfg_c = config.codec.clone();
+            let retry_samples = tokio::task::spawn_blocking(move || {
+                let enc = MfskEncoder::new(cfg_c).map_err(|e| {
                     std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
                 })?;
-                let bytes = dec.decode(&pcm).map_err(std::io::Error::other)?;
-                let frames = split_frames(&bytes).map_err(std::io::Error::other)?;
-                for f in &frames {
-                    if f.flags & framing::flags::NAK != 0 {
-                        let seqs = f
-                            .payload
-                            .chunks_exact(4)
-                            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
-                            .collect();
-                        return Ok(seqs);
-                    }
-                }
-                Ok(vec![])
+                Ok::<Vec<i16>, std::io::Error>(enc.encode(&retry_bytes))
             })
             .await
             .expect("blocking task panicked");
 
-        let missing = match missing_result {
-            Ok(m) => m,
-            Err(e) => {
-                warn!("ARQ: failed to decode NAK on retry {retry}: {e}");
-                continue;
+            match retry_samples {
+                Ok(s) => {
+                    send_rtp_burst(&s, &transport, rtp_dest, &mut rtp_sess, config.verbose).await;
+                }
+                Err(e) => warn!("ARQ: encode error on retry {retry}: {e}"),
             }
-        };
-
-        if missing.is_empty() {
-            info!("ARQ: empty NAK on retry {retry}, transfer complete");
-            break;
         }
+    }
 
-        info!(
-            "ARQ retry {retry}/{}: retransmitting {} frames",
-            config.arq.retries,
-            missing.len()
-        );
-
-        // Encode only the missing frames.
-        let retry_bytes: Vec<u8> = missing
-            .iter()
-            .filter_map(|&seq| frame_bytes.get(&seq))
-            .flat_map(|b| b.iter().copied())
-            .collect();
-
-        let cfg_c = config.codec.clone();
-        let retry_samples = tokio::task::spawn_blocking(move || {
-            let enc = MfskEncoder::new(cfg_c).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string())
-            })?;
-            Ok::<Vec<i16>, std::io::Error>(enc.encode(&retry_bytes))
-        })
-        .await
-        .expect("blocking task panicked");
-
-        match retry_samples {
-            Ok(s) => {
-                send_rtp_burst(&s, &transport, rtp_dest, &mut rtp_sess, config.verbose).await;
-            }
-            Err(e) => warn!("ARQ: encode error on retry {retry}: {e}"),
-        }
+    // ---- BYE (after ARQ loop so the channel stays open for retransmissions) ----
+    if let Err(e) = sip.bye(dest, &call_id).await {
+        warn!("BYE error: {e}");
     }
 }
 
@@ -297,7 +295,7 @@ async fn receive_one(output_dir: &Path, config: &Config) {
     let codec = config.codec.clone();
 
     // ---- SIP signalling ----
-    let sip = SipAgent::new(voip.clone());
+    let mut sip = SipAgent::new(voip.clone());
     info!("listening for INVITE on :{}", voip.sip_port);
     let (caller_rtp_addr, call_id) = match sip.accept().await {
         Ok(v) => v,
@@ -316,7 +314,7 @@ async fn receive_one(output_dir: &Path, config: &Config) {
     let transport = match UdpTransport::bind(rtp_local).await {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("RTP bind error: {e}");
+            eprintln!("RTP bind error: {e} — call accepted but cannot receive media");
             return;
         }
     };
@@ -326,8 +324,10 @@ async fn receive_one(output_dir: &Path, config: &Config) {
     let transport_for_arq = transport.clone();
 
     // BYE waiter sends a oneshot when the call ends.
+    // Share the SIP transport from accept() so we don't rebind the port.
     let (bye_tx, bye_rx) = oneshot::channel::<()>();
-    let sip_bye = SipAgent::new(voip.clone());
+    let mut sip_bye = SipAgent::new(voip.clone());
+    sip_bye.share_transport_from(&sip);
     let call_id_for_bye = call_id.clone();
     tokio::spawn(async move {
         let _ = sip_bye.wait_for_bye(&call_id_for_bye).await;

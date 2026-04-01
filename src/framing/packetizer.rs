@@ -43,9 +43,7 @@ impl Packetizer {
         let chunks: Vec<&[u8]> = data.chunks(max_payload).collect();
         let n = chunks.len();
         for (i, chunk) in chunks.into_iter().enumerate() {
-            let f = flags::SYN; // clear SYN for data frames
             let flag_byte = if i + 1 == n { flags::FIN } else { 0u8 };
-            let _ = f; // suppress warning
             frames.push(Frame {
                 seq,
                 flags: flag_byte,
@@ -70,6 +68,12 @@ impl Packetizer {
 /// Magic(2) | SeqNum(4) | Flags(1) | PayloadLen(2) | Payload(N) | CRC-32(4)
 /// ```
 pub fn serialize_frame(frame: &Frame) -> Vec<u8> {
+    assert!(
+        frame.payload.len() <= u16::MAX as usize,
+        "frame payload too large ({} bytes, max {})",
+        frame.payload.len(),
+        u16::MAX
+    );
     let payload_len = frame.payload.len() as u16;
     let header_size = 2 + 4 + 1 + 2; // magic + seq + flags + payload_len
     let total = header_size + frame.payload.len() + 4;
@@ -96,7 +100,10 @@ pub fn deserialize_frame(data: &[u8]) -> Result<Frame, FramingError> {
     const MIN_SIZE: usize = HEADER_SIZE + CRC_SIZE;
 
     if data.len() < MIN_SIZE {
-        return Err(FramingError::BadMagic(0));
+        return Err(FramingError::Truncated {
+            needed: MIN_SIZE,
+            have: data.len(),
+        });
     }
 
     // Verify magic.
@@ -110,7 +117,10 @@ pub fn deserialize_frame(data: &[u8]) -> Result<Frame, FramingError> {
     let payload_len = u16::from_be_bytes([data[7], data[8]]) as usize;
 
     if data.len() < HEADER_SIZE + payload_len + CRC_SIZE {
-        return Err(FramingError::BadMagic(magic));
+        return Err(FramingError::Truncated {
+            needed: HEADER_SIZE + payload_len + CRC_SIZE,
+            have: data.len(),
+        });
     }
 
     let payload = data[HEADER_SIZE..HEADER_SIZE + payload_len].to_vec();
@@ -219,9 +229,26 @@ pub fn split_frames(data: &[u8]) -> Result<Vec<Frame>, FramingError> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Escape a string for embedding in a JSON value (handles `"` and `\`).
+/// Escape a string for embedding in a JSON value.
+///
+/// Handles `\`, `"`, and JSON-required control characters.
 fn escape_json_string(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                // JSON requires \uXXXX for other control characters.
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

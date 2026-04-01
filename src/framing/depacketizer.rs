@@ -51,9 +51,13 @@ impl Depacketizer {
             if frame.flags & flags::FIN != 0 {
                 self.received_fin = true;
                 // seq is 1-based relative to SYN (seq 0), so the number of
-                // data frames = frame.seq (which is the last seq number, 0-based,
-                // minus 0 for the SYN frame → frame.seq data frames total).
-                self.total_data_frames = Some(frame.seq + 1 - 1); // seq of last data frame
+                // data frames = frame.seq.
+                // Guard against corrupt/malicious FIN with an absurdly large seq.
+                const MAX_DATA_FRAMES: u32 = 1_000_000;
+                if frame.seq > MAX_DATA_FRAMES {
+                    return Err(FramingError::PayloadTooLarge(frame.seq as usize));
+                }
+                self.total_data_frames = Some(frame.seq);
             }
             self.frames.insert(frame.seq, frame);
         }
@@ -153,7 +157,8 @@ fn extract_json_string(json: &str, key: &str) -> Option<String> {
         }
         end += 1;
     }
-    Some(rest[..end].replace("\\\"", "\"").replace("\\\\", "\\"))
+    // Unescape in correct order: \\\\ first, then \\".
+    Some(rest[..end].replace("\\\\", "\\").replace("\\\"", "\""))
 }
 
 fn extract_json_number(json: &str, key: &str) -> Option<usize> {
@@ -167,8 +172,11 @@ fn extract_json_number(json: &str, key: &str) -> Option<usize> {
 }
 
 /// Replace path separators and null bytes to prevent directory traversal.
+///
+/// Also rejects `.` and `..` filenames that would escape the output directory.
 fn sanitise_filename(name: &str) -> String {
-    name.chars()
+    let sanitised: String = name
+        .chars()
         .map(|c| {
             if c == '/' || c == '\\' || c == '\0' {
                 '_'
@@ -176,7 +184,19 @@ fn sanitise_filename(name: &str) -> String {
                 c
             }
         })
-        .collect()
+        .collect();
+
+    // Reject bare `.` or `..` which would escape the output directory.
+    if sanitised == "." || sanitised == ".." {
+        return format!("_{sanitised}");
+    }
+
+    // Reject empty filename.
+    if sanitised.is_empty() {
+        return "_unnamed".to_owned();
+    }
+
+    sanitised
 }
 
 #[cfg(test)]

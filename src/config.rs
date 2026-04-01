@@ -46,7 +46,15 @@ impl CodecConfig {
     /// Number of bits encoded per symbol: log2(M).
     #[allow(dead_code)] // Public utility used by external consumers and diagnostics
     pub fn bits_per_symbol(&self) -> u32 {
-        (self.tones as f64).log2() as u32
+        match self.tones {
+            2 => 1,
+            4 => 2,
+            8 => 3,
+            16 => 4,
+            32 => 5,
+            // Validated at construction time; unreachable in practice.
+            n => (n as f64).log2() as u32,
+        }
     }
 
     /// Number of PCM samples per symbol window.
@@ -125,4 +133,56 @@ pub struct Config {
     pub save_audio: Option<std::path::PathBuf>,
     /// Keep the receiver listening after each completed transfer.
     pub persist: bool,
+}
+
+impl Config {
+    /// Validate configuration parameters.  Returns a list of problems found.
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        let c = &self.codec;
+
+        if c.sample_rate == 0 {
+            errors.push("sample_rate must be > 0".into());
+        }
+        if c.symbol_rate == 0 {
+            errors.push("symbol_rate must be > 0".into());
+        }
+        if c.signal_tone_ms == 0 {
+            errors.push("signal_tone_ms must be > 0".into());
+        }
+        if c.tone_spacing <= 0.0 {
+            errors.push("tone_spacing must be > 0".into());
+        }
+
+        // Check Nyquist: highest data tone must be below sample_rate / 2.
+        if c.sample_rate > 0 {
+            let nyquist = c.sample_rate as f64 / 2.0;
+            let highest_tone = c.base_freq + (c.tones as f64 - 1.0) * c.tone_spacing;
+            if highest_tone >= nyquist {
+                errors.push(format!(
+                    "highest data tone ({highest_tone:.0} Hz) >= Nyquist ({nyquist:.0} Hz)"
+                ));
+            }
+            if c.stop_tone_freq >= nyquist {
+                errors.push(format!(
+                    "stop_tone_freq ({:.0} Hz) >= Nyquist ({nyquist:.0} Hz)",
+                    c.stop_tone_freq
+                ));
+            }
+        }
+
+        // Check frame_size fits in u16.
+        if self.framing.frame_size > u16::MAX as usize {
+            errors.push(format!(
+                "frame_size ({}) exceeds maximum ({})",
+                self.framing.frame_size,
+                u16::MAX
+            ));
+        }
+        if self.framing.frame_size == 0 {
+            errors.push("frame_size must be > 0".into());
+        }
+
+        errors
+    }
 }

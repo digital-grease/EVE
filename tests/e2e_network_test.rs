@@ -86,7 +86,7 @@ async fn test_sip_handshake_over_real_udp() {
 
     // Spawn receiver (UAS): waits for INVITE, responds 200 OK, waits for ACK.
     let uas = tokio::spawn(async move {
-        let sip = eve::voip::sip::SipAgent::new(recv_voip);
+        let mut sip = eve::voip::sip::SipAgent::new(recv_voip);
         sip.accept().await
     });
 
@@ -95,7 +95,7 @@ async fn test_sip_handshake_over_real_udp() {
 
     // Spawn sender (UAC): sends INVITE, waits for 200 OK, sends ACK.
     let uac = tokio::spawn(async move {
-        let sip = eve::voip::sip::SipAgent::new(sender_voip);
+        let mut sip = eve::voip::sip::SipAgent::new(sender_voip);
         sip.invite(recv_addr, "test-call-001").await
     });
 

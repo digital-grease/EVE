@@ -38,6 +38,8 @@ pub enum FramingError {
     },
     #[error("bad magic {0:#06x}")]
     BadMagic(u16),
+    #[error("frame truncated: need {needed} bytes, have {have}")]
+    Truncated { needed: usize, have: usize },
     #[allow(dead_code)] // Reserved for future payload validation
     #[error("payload length {0} exceeds max frame size")]
     PayloadTooLarge(usize),
