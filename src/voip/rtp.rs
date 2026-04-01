@@ -19,11 +19,12 @@ pub fn pcm_to_ulaw_sample(sample: i16) -> u8 {
     let mut s = sample as i32;
 
     // Extract sign; work with positive magnitude.
+    // G.711 μ-law: sign bit 1 = negative, 0 = positive (before bit-complement).
     let sign: u8 = if s < 0 {
         s = -s;
-        0x00 // negative → sign bit = 0 in the G.711 convention
+        0x80 // negative → sign bit set
     } else {
-        0x80 // positive → sign bit = 1
+        0x00 // positive → sign bit clear
     };
 
     s = s.min(CLIP) + BIAS;
@@ -51,7 +52,7 @@ pub fn ulaw_to_pcm_sample(u: u8) -> i16 {
     let magnitude = ((mantissa << 3) + BIAS) << exp;
     let value = magnitude - BIAS;
 
-    if sign != 0 {
+    if sign == 0 {
         value as i16
     } else {
         -(value as i16)
@@ -92,16 +93,29 @@ impl RtpSession {
     /// The SSRC is derived from the current time nanoseconds XOR'd with a
     /// fixed salt (no external rand crate required).
     pub fn new(config: VoipConfig) -> Self {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
         use std::time::{SystemTime, UNIX_EPOCH};
+
+        // Mix multiple entropy sources for RFC 3550 compliance (random SSRC/seq/ts).
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0xDEAD_BEEF);
-        let ssrc = nanos ^ 0xC0DE_CAFE;
+            .map(|d| d.as_nanos())
+            .unwrap_or(0xDEAD_BEEF_CAFE_BABE);
+        let mut h = DefaultHasher::new();
+        nanos.hash(&mut h);
+        std::process::id().hash(&mut h);
+        std::thread::current().id().hash(&mut h);
+        let hash = h.finish();
+
+        let ssrc = (hash >> 32) as u32 ^ hash as u32;
+        let seq = (hash >> 16) as u16;
+        let timestamp = hash as u32;
+
         Self {
             ssrc,
-            seq: 0,
-            timestamp: 0,
+            seq,
+            timestamp,
             _config: config,
         }
     }
@@ -215,8 +229,10 @@ impl DejitterBuffer {
                     self.next_seq = Some(next.wrapping_add(1));
                 }
                 None => {
-                    // Gap: skip and advance.
+                    // Gap: skip and advance, but stop draining to avoid
+                    // infinite loop when the missing packet never arrives.
                     self.next_seq = Some(next.wrapping_add(1));
+                    break;
                 }
             }
         }
@@ -224,10 +240,35 @@ impl DejitterBuffer {
     }
 
     /// Flush remaining packets (call at end of stream).
+    ///
+    /// Emits packets in sequence order starting from `next_seq`, handling
+    /// u16 wraparound correctly.  Late packets with seq < next_seq are
+    /// discarded to avoid reordering the stream.
     pub fn flush(&mut self) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
-        for (_, b) in std::mem::take(&mut self.buffer) {
-            out.push(b.payload);
+        let mut buffer = std::mem::take(&mut self.buffer);
+        if let Some(mut seq) = self.next_seq {
+            // Drain in wrapping sequence order.  We skip at most
+            // `gap_budget` consecutive missing seqs to avoid spinning
+            // on a sparse map with widely spaced keys.
+            let mut gap_budget = buffer.len();
+            while !buffer.is_empty() && gap_budget > 0 {
+                match buffer.remove(&seq) {
+                    Some(b) => {
+                        out.push(b.payload);
+                        gap_budget = buffer.len(); // reset budget on hit
+                    }
+                    None => {
+                        gap_budget -= 1;
+                    }
+                }
+                seq = seq.wrapping_add(1);
+            }
+        } else {
+            // No next_seq set — fallback to BTreeMap order (no wrapping concern).
+            for (_, b) in buffer {
+                out.push(b.payload);
+            }
         }
         out
     }
@@ -281,22 +322,26 @@ mod tests {
     #[test]
     fn test_rtp_build_parse() {
         let mut sess = RtpSession::new(voip_cfg());
+        let initial_seq = sess.seq;
+        let initial_ts = sess.timestamp;
         let payload = vec![0xAAu8; 160];
         let packet = sess.build_packet(&payload);
         let (seq, ts, pl) = RtpSession::parse_packet(&packet).unwrap();
-        assert_eq!(seq, 0);
-        assert_eq!(ts, 0);
+        assert_eq!(seq, initial_seq);
+        assert_eq!(ts, initial_ts);
         assert_eq!(pl, payload.as_slice());
     }
 
     #[test]
     fn test_rtp_sequence_and_timestamp_advance() {
         let mut sess = RtpSession::new(voip_cfg());
+        let initial_seq = sess.seq;
+        let initial_ts = sess.timestamp;
         let _ = sess.build_packet(&[0u8; 160]);
         let packet2 = sess.build_packet(&[0u8; 160]);
         let (seq, ts, _) = RtpSession::parse_packet(&packet2).unwrap();
-        assert_eq!(seq, 1);
-        assert_eq!(ts, 160);
+        assert_eq!(seq, initial_seq.wrapping_add(1));
+        assert_eq!(ts, initial_ts.wrapping_add(160));
     }
 
     #[test]

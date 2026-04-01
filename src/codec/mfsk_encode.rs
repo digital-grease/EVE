@@ -38,8 +38,7 @@ impl MfskEncoder {
     ///
     /// Output layout: `[start tone][preamble][data symbols][stop tone]`.
     pub fn encode(&self, data: &[u8]) -> Vec<i16> {
-        let m = self.config.tones as usize;
-        let bits_per_symbol = (m as f64).log2() as usize;
+        let bits_per_symbol = self.config.bits_per_symbol() as usize;
         let sps = self.config.samples_per_symbol();
 
         let mut out: Vec<i16> = Vec::new();
@@ -189,18 +188,20 @@ fn generate_symbol(
     let ramp = RAMP_SAMPLES.min(sps / 4);
     let mut samples = Vec::with_capacity(sps);
 
+    let ramp_div = (ramp as f64 - 1.0).max(1.0); // ensures ramp reaches exactly 0/1 at boundaries
+
     for n in 0..sps {
         let amp = if n < ramp {
-            0.5 * (1.0 - (std::f64::consts::PI * n as f64 / ramp as f64).cos())
+            0.5 * (1.0 - (std::f64::consts::PI * n as f64 / ramp_div).cos())
         } else if n >= sps - ramp {
-            let t = (n - (sps - ramp)) as f64 / ramp as f64;
+            let t = (n - (sps - ramp)) as f64 / ramp_div;
             0.5 * (1.0 + (std::f64::consts::PI * t).cos())
         } else {
             1.0
         };
 
         let inst_freq = if n >= sps - ramp && ramp > 0 {
-            let t = (n - (sps - ramp)) as f64 / ramp as f64;
+            let t = (n - (sps - ramp)) as f64 / ramp_div;
             freq + t * (next_freq - freq)
         } else {
             freq

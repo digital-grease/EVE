@@ -13,8 +13,19 @@ pub fn write_wav<W: Write>(writer: &mut W, sample_rate: u32, samples: &[i16]) ->
     let bits_per_sample: u16 = 16;
     let byte_rate = sample_rate * num_channels as u32 * bits_per_sample as u32 / 8;
     let block_align: u16 = num_channels * bits_per_sample / 8;
-    let data_len = (samples.len() * 2) as u32;
-    let chunk_size = 36 + data_len;
+    let data_bytes = samples.len().checked_mul(2).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "WAV data too large")
+    })?;
+    if data_bytes > u32::MAX as usize {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("WAV data size {} exceeds 4 GiB limit", data_bytes),
+        ));
+    }
+    let data_len = data_bytes as u32;
+    let chunk_size = 36u32.checked_add(data_len).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "WAV chunk size overflow")
+    })?;
 
     // RIFF header.
     writer.write_all(b"RIFF")?;

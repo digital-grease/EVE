@@ -154,6 +154,23 @@ async fn main() {
         retries: cli.arq_retries,
         timeout_ms: cli.arq_timeout,
     };
+    let pre_cfg = config::Config {
+        codec: codec_cfg.clone(),
+        framing: framing_cfg.clone(),
+        voip: voip_cfg.clone(),
+        arq: arq_cfg.clone(),
+        verbose: cli.verbose,
+        save_audio: cli.save_audio.clone(),
+        persist: false,
+    };
+    let errors = pre_cfg.validate();
+    if !errors.is_empty() {
+        for e in &errors {
+            eprintln!("config error: {e}");
+        }
+        std::process::exit(2);
+    }
+
     match cli.command {
         Command::Send { file, dest } => {
             let cfg = config::Config {
