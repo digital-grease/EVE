@@ -1,5 +1,10 @@
 # eve — Encoded VoIP Exfil
 
+[![CI](https://img.shields.io/github/actions/workflow/status/digital-grease/EVE/ci.yml?branch=main&logo=github&label=CI)](https://github.com/digital-grease/EVE/actions/workflows/ci.yml)
+[![Rust](https://img.shields.io/badge/rust-2021_edition-orange?logo=rust)](https://www.rust-lang.org/)
+[![GitHub Release](https://img.shields.io/github/v/release/digital-grease/EVE?include_prereleases&logo=github)](https://github.com/digital-grease/EVE/releases)
+[![GitHub Issues](https://img.shields.io/github/issues/digital-grease/EVE)](https://github.com/digital-grease/EVE/issues)
+
 `eve` is a red-team / penetration-testing utility that transfers arbitrary files between two endpoints by encoding data as [mFSK](https://en.wikipedia.org/wiki/Frequency-shift_keying) (Multiple Frequency-Shift Keying) audio and streaming it over a SIP/RTP VoIP call. It is designed for authorized engagements to test Data-Loss Prevention (DLP) and network-monitoring controls.
 
 > **Authorization required.** Use only on systems and networks you are authorized to test.
