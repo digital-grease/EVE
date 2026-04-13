@@ -8,6 +8,7 @@
 /// 5. Pick the bin with highest energy, map back to bits, reassemble bytes.
 /// 6. Stop demodulating when a stop signal tone window is detected.
 use crate::config::CodecConfig;
+use tracing::{debug, info, trace, warn};
 
 /// Minimum fraction of window energy that must come from the target frequency
 /// for `detect_signal_tone` to return `true`.  0.5 = 50% of total energy.
@@ -69,8 +70,19 @@ impl MfskDecoder {
         let sps = self.config.samples_per_symbol();
         let tone_window = self.config.signal_tone_samples();
 
+        info!(
+            sample_count = samples.len(),
+            tones = self.config.tones,
+            "mFSK decode start"
+        );
+
         // 1. Confirm start signal tone in the leading window.
         if samples.len() < tone_window {
+            warn!(
+                sample_count = samples.len(),
+                required = tone_window,
+                "input too short for start tone detection"
+            );
             return Err(super::CodecError::InputTooShort);
         }
         if !detect_signal_tone(
@@ -79,19 +91,28 @@ impl MfskDecoder {
             self.config.sample_rate,
             TONE_DETECT_FRACTION,
         ) {
+            debug!("start tone not found at {:.0} Hz", self.config.start_tone_freq);
             return Err(super::CodecError::StartToneNotFound);
         }
+        debug!("start tone detected at {:.0} Hz", self.config.start_tone_freq);
 
         // 2. Build the reference preamble and locate its end via cross-correlation.
         let reference = self.build_reference_preamble();
         if samples.len() < reference.len() {
+            warn!(
+                sample_count = samples.len(),
+                required = reference.len(),
+                "input too short for preamble correlation"
+            );
             return Err(super::CodecError::InputTooShort);
         }
         let data_start = self.find_preamble(samples, &reference)?;
+        debug!(data_start, "preamble located, data begins at sample offset");
 
         // 3. Demodulate symbol by symbol, stopping at the stop signal tone.
         let data_samples = &samples[data_start..];
         if data_samples.is_empty() {
+            info!("no data samples after preamble");
             return Ok((Vec::new(), Vec::new()));
         }
 
@@ -103,15 +124,18 @@ impl MfskDecoder {
             Vec::new()
         };
 
+        let mut decoded_symbols = 0usize;
         for i in 0..n_symbols {
             let window = &data_samples[i * sps..(i + 1) * sps];
 
             // Stop demodulating if this window carries the stop signal tone.
             if self.is_stop_tone_window(window) {
+                debug!(symbol_index = i, "stop tone detected, ending demodulation");
                 break;
             }
 
             let tone_idx = self.detect_tone(window);
+            trace!(symbol = i, tone = tone_idx, "detected tone");
 
             if collect_snr {
                 let (best, second) = self.snr_estimate(window);
@@ -123,11 +147,33 @@ impl MfskDecoder {
             for shift in (0..bits_per_symbol).rev() {
                 symbol_bits.push(((tone_idx >> shift) & 1) as u8);
             }
+            decoded_symbols += 1;
         }
 
         // Pack bits into bytes (ignore trailing padding bits).
         let n_bytes = symbol_bits.len() / 8;
         let bytes = bits_to_bytes(&symbol_bits[..n_bytes * 8]);
+
+        if collect_snr && !snr_ratios.is_empty() {
+            let min_snr = snr_ratios.iter().cloned().fold(f64::INFINITY, f64::min);
+            let avg_snr = snr_ratios.iter().sum::<f64>() / snr_ratios.len() as f64;
+            let low_conf = snr_ratios.iter().filter(|&&r| r < 3.0).count();
+            info!(
+                symbols = decoded_symbols,
+                bytes = n_bytes,
+                min_snr = format!("{min_snr:.1}"),
+                avg_snr = format!("{avg_snr:.1}"),
+                low_confidence = low_conf,
+                "mFSK decode complete (verbose)"
+            );
+        } else {
+            info!(
+                symbols = decoded_symbols,
+                bytes = n_bytes,
+                "mFSK decode complete"
+            );
+        }
+
         Ok((bytes, snr_ratios))
     }
 
@@ -268,9 +314,19 @@ impl MfskDecoder {
         // Require a minimum correlation score to accept the preamble.
         // A perfect match yields 1.0; allow down to 0.5 for noisy channels.
         if best_score < 0.5 {
+            warn!(
+                best_score = format!("{best_score:.3}"),
+                threshold = 0.5,
+                "preamble not found, correlation too low"
+            );
             return Err(super::CodecError::PreambleNotFound);
         }
 
+        debug!(
+            offset = best_offset,
+            score = format!("{best_score:.3}"),
+            "preamble correlation match"
+        );
         Ok(best_offset + ref_len)
     }
 }

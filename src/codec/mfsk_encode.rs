@@ -13,6 +13,7 @@
 /// They let the decoder confirm it is receiving an eve stream before
 /// attempting preamble correlation, and mark the precise end of data.
 use crate::config::CodecConfig;
+use tracing::{debug, info};
 
 /// Number of raised-cosine ramp samples at each symbol boundary.
 /// 2 ms × 8 000 Hz = 16 samples.
@@ -41,6 +42,13 @@ impl MfskEncoder {
         let bits_per_symbol = self.config.bits_per_symbol() as usize;
         let sps = self.config.samples_per_symbol();
 
+        info!(
+            data_len = data.len(),
+            tones = self.config.tones,
+            symbol_rate = self.config.symbol_rate,
+            "mFSK encode start"
+        );
+
         let mut out: Vec<i16> = Vec::new();
 
         // 1. Start tone.
@@ -52,6 +60,13 @@ impl MfskEncoder {
         // 3. Data symbols.
         let bits = bytes_to_bits(data);
         let symbols = bits_to_symbols(&bits, bits_per_symbol);
+
+        debug!(
+            symbols = symbols.len(),
+            bits_per_symbol,
+            sps,
+            "encoding data symbols"
+        );
 
         let mut phase: f64 = 0.0; // continuous phase across symbols
         for (idx, &sym) in symbols.iter().enumerate() {
@@ -68,6 +83,12 @@ impl MfskEncoder {
 
         // 4. Stop tone.
         out.extend_from_slice(&self.stop_tone_samples());
+
+        info!(
+            pcm_samples = out.len(),
+            duration_ms = out.len() as u64 * 1000 / self.config.sample_rate as u64,
+            "mFSK encode complete"
+        );
 
         out
     }

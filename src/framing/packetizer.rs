@@ -2,6 +2,7 @@
 use super::{flags, Frame, FramingError, MAGIC};
 use crate::config::FramingConfig;
 use crc32fast::Hasher;
+use tracing::{debug, info, warn};
 
 /// Splits raw file data into a [`Vec<Frame>`] ready for mFSK encoding.
 pub struct Packetizer {
@@ -22,6 +23,13 @@ impl Packetizer {
         let max_payload = self.config.frame_size;
         let mut frames: Vec<Frame> = Vec::new();
         let mut seq: u32 = 0;
+
+        info!(
+            filename,
+            data_len = data.len(),
+            frame_size = max_payload,
+            "packetizing file"
+        );
 
         // SYN frame: metadata as JSON.
         // SYN payload is not subject to the data frame_size limit because it
@@ -55,8 +63,10 @@ impl Packetizer {
         // If the input was empty there are no data frames; mark the SYN frame FIN too.
         if data.is_empty() {
             frames[0].flags |= flags::FIN;
+            debug!("empty file: SYN+FIN in single frame");
         }
 
+        info!(total_frames = frames.len(), "packetization complete");
         Ok(frames)
     }
 }
@@ -100,6 +110,7 @@ pub fn deserialize_frame(data: &[u8]) -> Result<Frame, FramingError> {
     const MIN_SIZE: usize = HEADER_SIZE + CRC_SIZE;
 
     if data.len() < MIN_SIZE {
+        debug!(have = data.len(), needed = MIN_SIZE, "frame truncated");
         return Err(FramingError::Truncated {
             needed: MIN_SIZE,
             have: data.len(),
@@ -109,6 +120,7 @@ pub fn deserialize_frame(data: &[u8]) -> Result<Frame, FramingError> {
     // Verify magic.
     let magic = u16::from_be_bytes([data[0], data[1]]);
     if magic != MAGIC {
+        debug!(magic = format!("0x{magic:04x}"), "bad frame magic");
         return Err(FramingError::BadMagic(magic));
     }
 
@@ -138,6 +150,12 @@ pub fn deserialize_frame(data: &[u8]) -> Result<Frame, FramingError> {
     let actual_crc = hasher.finalize();
 
     if actual_crc != expected_crc {
+        warn!(
+            seq,
+            expected = format!("0x{expected_crc:08x}"),
+            actual = format!("0x{actual_crc:08x}"),
+            "frame CRC mismatch"
+        );
         return Err(FramingError::CrcMismatch {
             seq,
             expected: expected_crc,
@@ -204,6 +222,8 @@ pub fn split_frames(data: &[u8]) -> Result<Vec<Frame>, FramingError> {
     let mut frames = Vec::new();
     let mut pos = 0;
 
+    debug!(buffer_len = data.len(), "splitting frame buffer");
+
     while pos + MIN_FRAME <= data.len() {
         // Check magic; stop on padding or garbage.
         let magic = u16::from_be_bytes([data[pos], data[pos + 1]]);
@@ -222,6 +242,7 @@ pub fn split_frames(data: &[u8]) -> Result<Vec<Frame>, FramingError> {
         pos = frame_end;
     }
 
+    debug!(frames = frames.len(), "split complete");
     Ok(frames)
 }
 

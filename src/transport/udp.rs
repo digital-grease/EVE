@@ -5,6 +5,8 @@
 /// the original and the clone refer to the same bound socket.  This allows
 /// the ARQ coordinator to keep a reference to the receiver socket after the
 /// RTP-receive task has finished with it.
+use tracing::{debug, error};
+
 pub struct UdpTransport {
     socket: std::sync::Arc<tokio::net::UdpSocket>,
 }
@@ -21,11 +23,13 @@ impl UdpTransport {
     /// Bind to the given local address.
     pub async fn bind(addr: std::net::SocketAddr) -> Result<Self, super::TransportError> {
         let socket = tokio::net::UdpSocket::bind(addr).await.map_err(|e| {
+            error!(%addr, err = %e, "UDP bind failed");
             super::TransportError::BindFailed {
                 port: addr.port(),
                 source: e,
             }
         })?;
+        debug!(%addr, "UDP socket bound");
         Ok(Self {
             socket: std::sync::Arc::new(socket),
         })

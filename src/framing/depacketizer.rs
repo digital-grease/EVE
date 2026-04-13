@@ -1,6 +1,7 @@
 /// Depacketizer: reassembles [`Frame`]s into a complete file.
 use super::{flags, Frame, FramingError};
 use std::collections::HashMap;
+use tracing::{debug, error, info};
 
 /// Metadata parsed from the SYN frame payload.
 #[derive(Debug)]
@@ -40,9 +41,15 @@ impl Depacketizer {
         if frame.flags & flags::SYN != 0 {
             let json = String::from_utf8_lossy(&frame.payload);
             let meta = parse_syn_json(&json);
+            info!(
+                filename = %meta.filename,
+                declared_size = meta.size,
+                "SYN received"
+            );
             self.syn_meta = Some(meta);
             // If SYN also has FIN (empty file), handle immediately.
             if frame.flags & flags::FIN != 0 {
+                debug!("SYN+FIN: empty file");
                 self.received_fin = true;
                 self.total_data_frames = Some(0);
             }
@@ -55,8 +62,10 @@ impl Depacketizer {
                 // Guard against corrupt/malicious FIN with an absurdly large seq.
                 const MAX_DATA_FRAMES: u32 = 1_000_000;
                 if frame.seq > MAX_DATA_FRAMES {
+                    error!(seq = frame.seq, "FIN seq exceeds maximum, rejecting");
                     return Err(FramingError::PayloadTooLarge(frame.seq as usize));
                 }
+                info!(total_data_frames = frame.seq, "FIN received");
                 self.total_data_frames = Some(frame.seq);
             }
             self.frames.insert(frame.seq, frame);
@@ -104,6 +113,11 @@ impl Depacketizer {
             .collect();
 
         if !missing.is_empty() {
+            debug!(
+                missing = missing.len(),
+                total,
+                "assembly waiting for frames"
+            );
             return Ok(None); // still waiting
         }
 
@@ -119,14 +133,20 @@ impl Depacketizer {
         // Write file.
         let safe_name = sanitise_filename(&meta.filename);
         let out_path = self.output_dir.join(&safe_name);
-        std::fs::write(&out_path, &data)?;
-
-        let (received, _) = self.progress();
-        eprintln!(
-            "transfer complete: {} bytes → {:?} ({received}/{total} frames)",
-            data.len(),
-            out_path
-        );
+        match std::fs::write(&out_path, &data) {
+            Ok(()) => {
+                info!(
+                    path = %out_path.display(),
+                    bytes = data.len(),
+                    frames = total,
+                    "file written"
+                );
+            }
+            Err(e) => {
+                error!(path = %out_path.display(), err = %e, "failed to write file");
+                return Err(FramingError::Io(e));
+            }
+        }
 
         Ok(Some(out_path))
     }

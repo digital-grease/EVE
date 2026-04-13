@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{interval, timeout, Duration, MissedTickBehavior};
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -90,16 +90,16 @@ pub async fn run_sender(file: PathBuf, dest: SocketAddr, config: Config) {
     // ---- SIP signalling ----
     let mut sip = SipAgent::new(config.voip.clone());
     let call_id = format!("eve-{}", std::process::id());
-    info!("sending INVITE to {dest}");
+    info!(%dest, file = %file.display(), "sender starting");
     let receiver_rtp_port = match sip.invite(dest, &call_id).await {
         Ok(p) => p,
         Err(e) => {
-            eprintln!("SIP error: {e}");
+            error!("SIP error: {e}");
             return;
         }
     };
     let rtp_dest: SocketAddr = SocketAddr::new(dest.ip(), receiver_rtp_port);
-    info!("call established, receiver RTP at {rtp_dest}");
+    info!(%rtp_dest, "call established");
 
     // ---- Encode (CPU-bound, run in blocking thread) ----
     // Returns the encoded PCM stream AND a per-seq serialised-frame map used
@@ -141,13 +141,13 @@ pub async fn run_sender(file: PathBuf, dest: SocketAddr, config: Config) {
     let (samples, frame_bytes) = match encode_result {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("encode error: {e}");
+            error!("encode error: {e}");
             return;
         }
     };
 
     if samples.is_empty() {
-        eprintln!("nothing to send");
+        warn!("nothing to send");
         return;
     }
 
@@ -167,14 +167,16 @@ pub async fn run_sender(file: PathBuf, dest: SocketAddr, config: Config) {
     let transport = match UdpTransport::bind(rtp_local).await {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("RTP bind error: {e}");
+            error!("RTP bind error: {e}");
             return;
         }
     };
 
     let mut rtp_sess = RtpSession::new(config.voip.clone());
+    let packet_count = samples.len() / 160;
+    debug!(packets = packet_count, "sending initial RTP burst");
     send_rtp_burst(&samples, &transport, rtp_dest, &mut rtp_sess, config.verbose).await;
-    info!("initial transfer complete");
+    info!(packets = packet_count, "initial transfer complete");
 
     // ---- ARQ retransmission loop (before BYE so the channel stays open) ----
     if config.arq.retries > 0 && !frame_bytes.is_empty() {
@@ -296,15 +298,14 @@ async fn receive_one(output_dir: &Path, config: &Config) {
 
     // ---- SIP signalling ----
     let mut sip = SipAgent::new(voip.clone());
-    info!("listening for INVITE on :{}", voip.sip_port);
     let (caller_rtp_addr, call_id) = match sip.accept().await {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("SIP accept error: {e}");
+            error!("SIP accept error: {e}");
             return;
         }
     };
-    info!("call accepted, caller RTP at {caller_rtp_addr}");
+    info!(%caller_rtp_addr, "call accepted");
 
     // ---- RTP receive ----
     let rtp_local: SocketAddr = SocketAddr::new(
@@ -314,7 +315,7 @@ async fn receive_one(output_dir: &Path, config: &Config) {
     let transport = match UdpTransport::bind(rtp_local).await {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("RTP bind error: {e} — call accepted but cannot receive media");
+            error!("RTP bind error: {e} — call accepted but cannot receive media");
             return;
         }
     };
@@ -392,22 +393,9 @@ async fn receive_one(output_dir: &Path, config: &Config) {
         let dec = MfskDecoder::new(codec)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
         let all_bytes = if verbose {
-            let (bytes, snr_ratios) = dec
+            let (bytes, _snr) = dec
                 .decode_verbose(&pcm)
                 .map_err(std::io::Error::other)?;
-            if !snr_ratios.is_empty() {
-                let min_snr = snr_ratios.iter().cloned().fold(f64::INFINITY, f64::min);
-                let avg_snr = snr_ratios.iter().sum::<f64>() / snr_ratios.len() as f64;
-                let low_confidence = snr_ratios.iter().filter(|&&r| r < 3.0).count();
-                eprintln!(
-                    "mFSK decode: {} symbols, SNR min={:.1} avg={:.1}, low-confidence={}/{}",
-                    snr_ratios.len(),
-                    min_snr,
-                    avg_snr,
-                    low_confidence,
-                    snr_ratios.len(),
-                );
-            }
             bytes
         } else {
             dec.decode(&pcm).map_err(std::io::Error::other)?
@@ -444,7 +432,7 @@ async fn receive_one(output_dir: &Path, config: &Config) {
     let (output_path, mut depack) = match decode_result {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("decode error: {e}");
+            error!("decode error: {e}");
             return;
         }
     };
@@ -475,6 +463,7 @@ async fn receive_one(output_dir: &Path, config: &Config) {
             config.arq.retries,
             missing.len()
         );
+        debug!(missing_seqs = ?missing, "ARQ missing sequence numbers");
 
         // Encode NAK frame → mFSK → send to sender.
         let nak_bytes = serialize_nak_frame(&missing);
@@ -569,15 +558,17 @@ pub fn run_loopback(file: PathBuf, config: Config, loss_rate: f64) -> bool {
     let data = match std::fs::read(&file) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("error reading {:?}: {e}", file);
+            error!(file = %file.display(), "error reading file: {e}");
             return false;
         }
     };
 
+    info!(file = %file.display(), size = data.len(), "loopback test starting");
+
     let enc = match MfskEncoder::new(config.codec.clone()) {
         Ok(e) => e,
         Err(e) => {
-            eprintln!("encoder error: {e}");
+            error!("encoder error: {e}");
             return false;
         }
     };
@@ -588,10 +579,10 @@ pub fn run_loopback(file: PathBuf, config: Config, loss_rate: f64) -> bool {
             Ok(f) => {
                 let mut bw = BufWriter::new(f);
                 if let Err(e) = wav::write_wav(&mut bw, config.codec.sample_rate, &samples) {
-                    eprintln!("warning: failed to write WAV: {e}");
+                    warn!("failed to write WAV: {e}");
                 }
             }
-            Err(e) => eprintln!("warning: cannot create WAV file: {e}"),
+            Err(e) => warn!("cannot create WAV file: {e}"),
         }
     }
 
@@ -617,14 +608,14 @@ pub fn run_loopback(file: PathBuf, config: Config, loss_rate: f64) -> bool {
     let dec = match MfskDecoder::new(config.codec.clone()) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("decoder error: {e}");
+            error!("decoder error: {e}");
             return false;
         }
     };
     let decoded = match dec.decode(&samples) {
         Ok(d) => d,
         Err(e) => {
-            eprintln!("decode error: {e}");
+            error!("decode error: {e}");
             return false;
         }
     };

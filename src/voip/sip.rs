@@ -9,6 +9,7 @@ use crate::config::VoipConfig;
 use crate::transport::udp::UdpTransport;
 use std::net::SocketAddr;
 use tokio::time::{timeout, Duration};
+use tracing::{debug, info, warn};
 
 /// Default timeout for SIP responses (10 seconds).
 const SIP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -225,6 +226,7 @@ impl SipAgent {
         self.ensure_transport().await?;
         let transport = self.transport();
 
+        info!(%dest, call_id, "SIP INVITE →");
         let invite = build_invite(dest, local_addr, call_id, self.config.rtp_port);
         transport
             .send_to(invite.as_bytes(), dest)
@@ -241,9 +243,12 @@ impl SipAgent {
                 let msg = String::from_utf8_lossy(&data);
                 if msg.starts_with("SIP/2.0 200") {
                     let rtp_port = parse_sdp_rtp_port(&msg)
-                        .ok_or_else(|| super::VoipError::Sip("no RTP port in 200 OK".into()))?;
+                        .ok_or_else(|| {
+                            warn!("200 OK missing RTP port in SDP");
+                            super::VoipError::Sip("no RTP port in 200 OK".into())
+                        })?;
 
-                    // Send ACK.
+                    info!(rtp_port, "200 OK received, sending ACK");
                     let ack = build_ack(dest, local_addr, call_id);
                     transport
                         .send_to(ack.as_bytes(), dest)
@@ -258,7 +263,10 @@ impl SipAgent {
 
         match result {
             Ok(inner) => inner,
-            Err(_) => Err(super::VoipError::Sip("INVITE timed out waiting for 200 OK".into())),
+            Err(_) => {
+                warn!(timeout_secs = SIP_TIMEOUT.as_secs(), "INVITE timed out waiting for 200 OK");
+                Err(super::VoipError::Sip("INVITE timed out waiting for 200 OK".into()))
+            }
         }
     }
 
@@ -269,6 +277,7 @@ impl SipAgent {
         self.ensure_transport().await?;
         let transport = self.transport();
 
+        info!(%dest, call_id, "SIP BYE →");
         let bye = build_bye(dest, local_addr, call_id);
         transport
             .send_to(bye.as_bytes(), dest)
@@ -286,6 +295,8 @@ impl SipAgent {
         self.ensure_transport().await?;
         let transport = self.transport();
 
+        info!(sip_port = self.config.sip_port, "listening for INVITE");
+
         // Wait for INVITE.
         loop {
             let (data, src) = transport
@@ -294,13 +305,22 @@ impl SipAgent {
                 .map_err(|e| super::VoipError::Sip(e.to_string()))?;
             let msg = String::from_utf8_lossy(&data);
             if !is_method(&msg, "INVITE") {
+                debug!(%src, "ignored non-INVITE message");
                 continue;
             }
 
             let call_id = parse_call_id(&msg)
-                .ok_or_else(|| super::VoipError::Sip("INVITE missing Call-ID".into()))?;
+                .ok_or_else(|| {
+                    warn!(%src, "INVITE missing Call-ID");
+                    super::VoipError::Sip("INVITE missing Call-ID".into())
+                })?;
             let caller_rtp_port = parse_sdp_rtp_port(&msg)
-                .ok_or_else(|| super::VoipError::Sip("INVITE missing RTP port".into()))?;
+                .ok_or_else(|| {
+                    warn!(%src, call_id = %call_id, "INVITE missing RTP port");
+                    super::VoipError::Sip("INVITE missing RTP port".into())
+                })?;
+
+            info!(%src, call_id = %call_id, caller_rtp_port, "INVITE received");
 
             // Echo the From header from the INVITE into the 200 OK.
             let from_header = parse_from_header(&msg)
@@ -312,6 +332,7 @@ impl SipAgent {
                 .send_to(ok.as_bytes(), src)
                 .await
                 .map_err(|e| super::VoipError::Sip(e.to_string()))?;
+            debug!("200 OK sent");
 
             // Wait for ACK with Call-ID verification and timeout.
             let ack_result = timeout(SIP_TIMEOUT, async {
@@ -325,10 +346,12 @@ impl SipAgent {
                         // Verify Call-ID matches.
                         if let Some(ack_cid) = parse_call_id(&ack_msg) {
                             if ack_cid != call_id {
+                                debug!(ack_call_id = %ack_cid, "ignoring ACK for different call");
                                 continue; // ACK for a different call
                             }
                         }
                         let caller_rtp_addr = SocketAddr::new(src.ip(), caller_rtp_port);
+                        info!(%caller_rtp_addr, "ACK received, call established");
                         return Ok::<_, super::VoipError>((caller_rtp_addr, call_id.clone()));
                     }
                 }
@@ -337,7 +360,10 @@ impl SipAgent {
 
             return match ack_result {
                 Ok(inner) => inner,
-                Err(_) => Err(super::VoipError::Sip("timed out waiting for ACK".into())),
+                Err(_) => {
+                    warn!(timeout_secs = SIP_TIMEOUT.as_secs(), "timed out waiting for ACK");
+                    Err(super::VoipError::Sip("timed out waiting for ACK".into()))
+                }
             };
         }
     }
@@ -359,6 +385,7 @@ impl SipAgent {
                 .map_err(|e| super::VoipError::Sip(e.to_string()))?
         };
 
+        debug!(call_id, "waiting for BYE");
         let result = timeout(Duration::from_secs(120), async {
             loop {
                 let (data, src) = transport
@@ -369,9 +396,11 @@ impl SipAgent {
                 if is_method(&msg, "BYE") {
                     if let Some(cid) = parse_call_id(&msg) {
                         if cid != call_id {
+                            debug!(bye_call_id = %cid, "ignoring BYE for different call");
                             continue; // different session
                         }
                     }
+                    info!(call_id, "BYE received, sending 200 OK");
                     let ok =
                         format!("SIP/2.0 200 OK\r\nCall-ID: {call_id}\r\nContent-Length: 0\r\n\r\n");
                     transport
@@ -386,7 +415,10 @@ impl SipAgent {
 
         match result {
             Ok(inner) => inner,
-            Err(_) => Err(super::VoipError::Sip("timed out waiting for BYE".into())),
+            Err(_) => {
+                warn!(call_id, "timed out (120s) waiting for BYE");
+                Err(super::VoipError::Sip("timed out waiting for BYE".into()))
+            }
         }
     }
 }
