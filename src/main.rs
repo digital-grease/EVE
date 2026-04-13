@@ -12,6 +12,7 @@ mod wav;
 
 use clap::{Parser, Subcommand};
 use std::{net::SocketAddr, path::PathBuf};
+use tracing::error;
 
 #[derive(Parser)]
 #[command(
@@ -128,9 +129,15 @@ fn parse_tones(s: &str) -> Result<u8, String> {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
-
     let cli = Cli::parse();
+
+    // RUST_LOG takes precedence; if unset, --verbose → debug, otherwise info.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| {
+            let default = if cli.verbose { "debug" } else { "info" };
+            tracing_subscriber::EnvFilter::new(default)
+        });
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     let codec_cfg = config::CodecConfig {
         tones: cli.tones,
@@ -166,7 +173,7 @@ async fn main() {
     let errors = pre_cfg.validate();
     if !errors.is_empty() {
         for e in &errors {
-            eprintln!("config error: {e}");
+            error!("config error: {e}");
         }
         std::process::exit(2);
     }

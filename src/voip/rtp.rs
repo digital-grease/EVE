@@ -3,6 +3,7 @@
 /// RTP header format follows RFC 3550.
 /// G.711 μ-law encoding follows ITU-T G.711 Table 2 (256-entry lookup tables).
 use crate::config::VoipConfig;
+use tracing::{debug, trace, warn};
 
 // ---------------------------------------------------------------------------
 // G.711 μ-law codec (ITU-T G.711 / CCITT reference algorithm)
@@ -112,6 +113,12 @@ impl RtpSession {
         let seq = (hash >> 16) as u16;
         let timestamp = hash as u32;
 
+        debug!(
+            ssrc = format!("0x{ssrc:08x}"),
+            seq,
+            timestamp,
+            "RTP session created"
+        );
         Self {
             ssrc,
             seq,
@@ -149,6 +156,7 @@ impl RtpSession {
     /// Parse an RTP packet, returning `(sequence, timestamp, payload)`.
     pub fn parse_packet(data: &[u8]) -> Result<(u16, u32, &[u8]), super::VoipError> {
         if data.len() < RTP_HEADER_SIZE {
+            warn!(len = data.len(), "RTP packet too short");
             return Err(super::VoipError::Rtp(format!(
                 "packet too short: {} bytes",
                 data.len()
@@ -156,6 +164,7 @@ impl RtpSession {
         }
         let version = (data[0] >> 6) & 0x03;
         if version != 2 {
+            warn!(version, "bad RTP version");
             return Err(super::VoipError::Rtp(format!("bad RTP version {version}")));
         }
         let seq = u16::from_be_bytes([data[2], data[3]]);
@@ -190,6 +199,7 @@ impl DejitterBuffer {
     /// `jitter_ms` at 8 kHz with 160 samples/packet → depth = jitter_ms / 20.
     pub fn new(jitter_ms: u32) -> Self {
         let depth = jitter_ms.div_ceil(20).max(1) as usize;
+        debug!(jitter_ms, depth, "dejitter buffer created");
         Self {
             depth,
             buffer: std::collections::BTreeMap::new(),
@@ -231,6 +241,7 @@ impl DejitterBuffer {
                 None => {
                     // Gap: skip and advance, but stop draining to avoid
                     // infinite loop when the missing packet never arrives.
+                    trace!(seq = next, "dejitter gap, skipping");
                     self.next_seq = Some(next.wrapping_add(1));
                     break;
                 }
@@ -246,6 +257,8 @@ impl DejitterBuffer {
     /// discarded to avoid reordering the stream.
     pub fn flush(&mut self) -> Vec<Vec<u8>> {
         let mut out = Vec::new();
+        let remaining = self.buffer.len();
+        debug!(remaining, "dejitter buffer flush");
         let mut buffer = std::mem::take(&mut self.buffer);
         if let Some(mut seq) = self.next_seq {
             // Drain in wrapping sequence order.  We skip at most
